@@ -785,13 +785,49 @@
   }
 
   /* ================= PÁGINA: RELATÓRIOS ================= */
-  function pgRelatorios(c) {
+  // Excel/PDF gerados pelo exportador OFICIAL (modelo oficial da Masters, mesmo do sistema atual),
+  // a partir dos dados do Supabase. Função de servidor "exportar" confere login e permissão.
+  async function pgRelatorios(c) {
+    var base = await carregarBase(), podeExportar = pode('relatorios.exportar');
+    var hoje = hojeISO(), ini = hoje.slice(0, 8) + '01';
+    var dIni = el('input', { type: 'date', value: ini, max: hoje }), dFim = el('input', { type: 'date', value: hoje, max: hoje });
+    var obra = selecao([['', 'Todas as obras']].concat(base.obras.filter(function (o) { return o.situacao !== 'inativa'; }).map(function (o) { return [o.id, nomeObra(o)]; })), '');
+    var msg = el('p', { class: 'msg', hidden: true });
+    var bExcel = el('button', { type: 'button', class: 'btn', text: 'Exportar Excel' }), bPdf = el('button', { type: 'button', class: 'btn sec', text: 'Exportar PDF' });
     limpar(c);
     c.appendChild(el('h1', { class: 'tit', text: 'Relatórios e exportações' }));
-    c.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px' }, [
-      el('h2', { text: 'Exportação Excel e PDF no modelo oficial' }),
-      el('p', { class: 'msg av', text: 'Em implantação (etapa 7). Enquanto isso, continue exportando pelo sistema atual — ele segue oficial durante o período em paralelo, com o mesmo modelo de sempre.' })
-    ]));
+    var card = el('section', { class: 'card', style: 'display:grid;gap:12px' }, [
+      el('h2', { text: 'Controle de efetivo diário — modelo oficial' }),
+      el('p', { class: 'nota', text: 'Mesmo arquivo do sistema atual (modelo oficial da Masters, com o TOTAL GERAL e os meses corrigidos). Somente funcionários ativos. Período de até 31 dias.' }),
+      el('div', { class: 'form' }, [el('label', {}, ['Data inicial', dIni]), el('label', {}, ['Data final', dFim]), el('label', {}, ['Obra', obra])]),
+      el('div', { class: 'acoes' }, [bExcel, bPdf]), msg
+    ]);
+    c.appendChild(card);
+    if (!podeExportar) { bExcel.disabled = bPdf.disabled = true; mostrar('Seu perfil pode ver relatórios, mas não exportar. Peça a permissão "relatorios.exportar" ao administrador.', 'av'); }
+    function mostrar(t, tipo) { msg.hidden = !t; msg.className = 'msg ' + (tipo || ''); msg.textContent = t || ''; }
+    async function exportar(formato) {
+      var a = dIni.value, b = dFim.value;
+      if (!a || !b || a > b) return mostrar('Informe um período válido (a data inicial não pode ser depois da final).', 'er');
+      if ((new Date(b) - new Date(a)) / 86400000 > 30) return mostrar('Selecione no máximo 31 dias.', 'er');
+      if (!navigator.onLine) return mostrar('Sem internet: a exportação precisa de conexão.', 'er');
+      bExcel.disabled = bPdf.disabled = true;
+      mostrar('Gerando o arquivo no modelo oficial… pode levar até 1 minuto.', 'av');
+      try {
+        var r = await sb.functions.invoke('exportar', { body: { formato: formato, dataInicio: a, dataFim: b, obraId: obra.value } });
+        var d = r.data;
+        if (r.error) { try { d = await r.error.context.json(); } catch (x) { d = null; } }
+        if (!d || !d.ok) throw new Error((d && d.mensagem) || 'Falha na exportação.');
+        var bin = atob(d.base64), bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var url = URL.createObjectURL(new Blob([bytes], { type: d.mime || 'application/octet-stream' }));
+        var lk = el('a', { href: url, download: d.nome }); document.body.appendChild(lk); lk.click(); lk.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+        mostrar('Pronto: ' + d.nome + ' (' + (d.resumo && d.resumo.obras) + ' obra(s), ' + (d.resumo && d.resumo.registros) + ' registro(s)). Se o download não abriu, toque de novo.', 'ok');
+      } catch (e) { mostrar(erroTexto(e), 'er'); }
+      finally { bExcel.disabled = bPdf.disabled = !podeExportar; }
+    }
+    bExcel.onclick = function () { exportar('EXCEL'); };
+    bPdf.onclick = function () { exportar('PDF'); };
   }
 
   /* ================= PÁGINA: USUÁRIOS ================= */
