@@ -1,6 +1,6 @@
 /* Efetivo Diário — Masters · service worker (funcionamento sem internet)
  * Guarda os arquivos do aplicativo no aparelho. NUNCA guarda dados do banco (chamadas ao Supabase passam direto). */
-var VERSAO_CACHE = 'efetivo-masters-v1.2.1';
+var VERSAO_CACHE = 'efetivo-masters-v1.2.2';
 var ARQUIVOS = ['./', './index.html', './app.js', './config.js', './manifest.webmanifest',
   './icons/logo-masters.png', './icons/icon-192.png', './icons/icon-512.png',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js'];
@@ -25,7 +25,8 @@ self.addEventListener('fetch', function (e) {
   var permitido = proprio || url.hostname === 'cdn.jsdelivr.net' || /fonts\.(googleapis|gstatic)\.com$/.test(url.hostname);
   if (!permitido) return;
   // rede primeiro (pega atualizações); sem internet, usa a cópia guardada
-  e.respondWith(fetch(req).then(function (resp) {
+  // arquivos do próprio app: sempre confere com o servidor (não usa a cópia antiga do navegador)
+  e.respondWith(fetch(proprio ? new Request(req, { cache: 'no-cache' }) : req).then(function (resp) {
     if (resp && (resp.ok || resp.type === 'opaque')) {
       var copia = resp.clone(); caches.open(VERSAO_CACHE).then(function (c) { c.put(req, copia); });
     }
