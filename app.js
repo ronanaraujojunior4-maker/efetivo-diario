@@ -948,7 +948,10 @@
   async function lerPlanilhaContratos(arquivo) {
     if (!arquivo) throw new Error('Escolha o arquivo.');
     var X = await carregarSheetJS();
-    var wb = X.read(new Uint8Array(await arquivo.arrayBuffer()), { type: 'array', cellDates: false });
+    var bytes = new Uint8Array(await arquivo.arrayBuffer());
+    if (!bytes.length) throw new Error('O arquivo "' + arquivo.name + '" chegou vazio (0 bytes). Se ele está no Google Drive/OneDrive, baixe para o aparelho e escolha de novo.');
+    var assinatura = Array.prototype.slice.call(bytes, 0, 8).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join(' ');
+    var wb = X.read(bytes, { type: 'array', cellDates: false });
     var ws = wb.Sheets[wb.SheetNames[0]];
     var m = X.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
     var iCab = -1, col = {};
@@ -965,7 +968,7 @@
     }
     if (iCab < 0 || col.adm == null || col.venc == null) {
       var lido = m.slice(0, 3).map(function (l) { return l.filter(function (v) { return v !== ''; }).slice(0, 7).join(' | '); }).join(' / ');
-      throw new Error('Layout não reconhecido: falta o cabeçalho "Cod / Nome do Funcionário / Admissão / Vencimento Experiência". Lido no arquivo (aba "' + wb.SheetNames[0] + '"): ' + (lido || 'nada'));
+      throw new Error('Layout não reconhecido: falta o cabeçalho "Cod / Nome do Funcionário / Admissão / Vencimento Experiência". Lido no arquivo (aba "' + wb.SheetNames[0] + '"): ' + (lido || 'nada') + ' · ' + arquivo.name + ', ' + bytes.length + ' bytes, início ' + assinatura + ', leitor ' + (X.version || '?') + '. Alternativa: abra no Excel e use "Salvar como" .xlsx.');
     }
     function data(v) {
       if (v === '' || v == null) return '';

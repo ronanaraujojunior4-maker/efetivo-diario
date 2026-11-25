@@ -5,5 +5,5 @@ window.EFETIVO_CONFIG = {
   supabaseUrl: 'https://quamxjvlybavixlpppsv.supabase.co',
   supabaseKey: 'sb_publishable_eU1ecqHDfDYRV5ffDQM9yg_AfbT_Lng',
   dominioLogin: 'efetivo.local',
-  versao: '1.2.2'
+  versao: '1.2.3'
 };
