@@ -948,7 +948,7 @@
   async function lerPlanilhaContratos(arquivo) {
     if (!arquivo) throw new Error('Escolha o arquivo.');
     var X = await carregarSheetJS();
-    var wb = X.read(await arquivo.arrayBuffer(), { type: 'array' });
+    var wb = X.read(new Uint8Array(await arquivo.arrayBuffer()), { type: 'array', cellDates: false });
     var ws = wb.Sheets[wb.SheetNames[0]];
     var m = X.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
     var iCab = -1, col = {};
@@ -963,7 +963,10 @@
         });
       }
     }
-    if (iCab < 0 || col.adm == null || col.venc == null) throw new Error('Layout não reconhecido: falta o cabeçalho "Cod / Nome do Funcionário / Admissão / Vencimento Experiência".');
+    if (iCab < 0 || col.adm == null || col.venc == null) {
+      var lido = m.slice(0, 3).map(function (l) { return l.filter(function (v) { return v !== ''; }).slice(0, 7).join(' | '); }).join(' / ');
+      throw new Error('Layout não reconhecido: falta o cabeçalho "Cod / Nome do Funcionário / Admissão / Vencimento Experiência". Lido no arquivo (aba "' + wb.SheetNames[0] + '"): ' + (lido || 'nada'));
+    }
     function data(v) {
       if (v === '' || v == null) return '';
       if (typeof v === 'number') { var d = X.SSF.parse_date_code(v); return d ? d.y + '-' + String(d.m).padStart(2, '0') + '-' + String(d.d).padStart(2, '0') : ''; }
