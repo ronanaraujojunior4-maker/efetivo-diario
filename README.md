@@ -1,7 +1,7 @@
 # Efetivo Diário — Masters (RH + SESMT)
 
 Aplicativo web instalável (PWA) do Controle de Efetivo da Engenharia — Masters.
-Desenvolvido por ESTERNAN Tecnologia e Sistemas · *Tecnologia com propósito*.
+Desenvolvido por Ronter Technology.
 
 ## Como funciona
 

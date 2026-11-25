@@ -1,6 +1,6 @@
 /* Efetivo Diário — Masters · service worker (funcionamento sem internet)
  * Guarda os arquivos do aplicativo no aparelho. NUNCA guarda dados do banco (chamadas ao Supabase passam direto). */
-var VERSAO_CACHE = 'efetivo-masters-v1.1.0';
+var VERSAO_CACHE = 'efetivo-masters-v1.2.0';
 var ARQUIVOS = ['./', './index.html', './app.js', './config.js', './manifest.webmanifest',
   './icons/logo-masters.png', './icons/icon-192.png', './icons/icon-512.png',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js'];

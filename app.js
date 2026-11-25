@@ -55,7 +55,8 @@
       if (/funcionarios_matricula/.test(m)) return 'Já existe funcionário com essa matrícula.';
       if (/funcionarios_nome/.test(m)) return 'Já existe funcionário com esse nome.';
       if (/obras_/.test(m)) return 'Já existe uma obra com esse código ou nome.';
-      if (/equipes_/.test(m)) return 'Já existe uma equipe com esse nome.';
+      if (/funcionarios_cpf/.test(m)) return 'Já existe funcionário com esse CPF.';
+      if (/contratos_func_adm/.test(m)) return 'Já existe contrato para este funcionário com essa admissão.';
       return 'Registro duplicado.';
     }
     if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Sem conexão com o servidor. Verifique a internet.';
@@ -264,13 +265,14 @@
     ['efetivo', 'Efetivo Diário', 'efetivo.ver', pgEfetivo],
     ['funcionarios', 'Funcionários', 'funcionarios.ver', pgFuncionarios],
     ['obras', 'Obras', 'obras.ver', pgObras],
-    ['equipes', 'Equipes', 'equipes.ver', pgEquipes],
+    ['contratos', 'Contratos de Trabalho', 'contratos.ver', pgContratos],
+    ['fichas', 'Fichas de Avaliação', 'fichas.emitir', pgFichas],
     ['transferencias', 'Transferências', 'transferencias.ver', pgTransferencias],
     ['relatorios', 'Relatórios', 'relatorios.ver', pgRelatorios],
     ['usuarios', 'Usuários e acessos', 'usuarios.gerenciar', pgUsuarios],
     ['config', 'Configurações', null, pgConfig]
   ];
-  function paginasPermitidas() { return PAGINAS_RH.filter(function (p) { return !p[2] || pode(p[2]); }); }
+  function paginasPermitidas() { return PAGINAS_RH.filter(function (p) { return (!p[2] || pode(p[2])) && (p[0] !== 'contratos' || S.usuario.perfil === 'ADM'); }); }
   function entrarNoApp(amb) {
     S.ambiente = amb;
     $('acesso').hidden = true; $('ambientes').hidden = true; $('app').hidden = false;
@@ -312,6 +314,8 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'funcionarios' }, aoMudar)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'obras' }, aoMudar)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'transferencias' }, aoMudar)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'fichas_avaliacao' }, aoMudar)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'contratos_trabalho' }, aoMudar)
       .subscribe(function (status) { S.aoVivo = status === 'SUBSCRIBED'; var a = $('aoVivo'); if (a) pintarAoVivo(a); });
   }
   function aoMudar() {
@@ -319,6 +323,8 @@
     recarregarAgendado = setTimeout(function () {
       if (S.pagina === 'inicio' && S.recarregarDashboard) S.recarregarDashboard(true);
       if (S.pagina === 'transferencias' && S.recarregarTransf) S.recarregarTransf();
+      if (S.pagina === 'fichas' && S.recarregarFichas) S.recarregarFichas();
+      if (S.pagina === 'contratos' && S.recarregarContratos) S.recarregarContratos();
     }, 600);
   }
   function pintarAoVivo(a) {
@@ -331,7 +337,7 @@
     if (!forcar && S.cache.base && Date.now() - S.cache.base.em < 30000) return S.cache.base;
     try {
       var r = await Promise.all([
-        consulta(sb.from('funcionarios').select('id,matricula,nome,funcao_texto,profissao_id,admissao,situacao,pendencias').order('nome')),
+        consulta(sb.from('funcionarios').select('id,matricula,nome,funcao_texto,profissao_id,admissao,situacao,pendencias,cpf,desligado_em,desligamento_motivo,desligamento_registrado_por_nome,desligamento_registrado_em').order('nome')),
         consulta(sb.from('obras').select('id,codigo,nome,responsavel,situacao').order('nome')),
         consulta(sb.from('equipes').select('id,nome,obra_id,situacao').order('nome'))
       ]);
@@ -373,7 +379,7 @@
       }
       var regs = await consulta(sb.from('registros_diarios').select('funcionario_id,status,obra_id').eq('data', S.dashData).is('excluido_em', null));
       // mesma regra do sistema atual: só funcionários ativos; 1 registro por funcionário/dia
-      var ativos = {}, mapaO = {}; base.funcionarios.forEach(function (f) { if (f.situacao !== 'inativo') ativos[f.id] = 1; });
+      var ativos = {}, mapaO = {}; base.funcionarios.forEach(function (f) { if (f.situacao === 'ativo' || (f.desligado_em && f.desligado_em >= S.dashData)) ativos[f.id] = 1; });   // desligado conta até o dia do desligamento
       base.obras.forEach(function (o) { mapaO[o.id] = o; });
       var porF = {}; regs.forEach(function (r) { if (!ativos[r.funcionario_id]) return; if (obraS.value && r.obra_id !== obraS.value) return; porF[r.funcionario_id] = r; });
       var lista = Object.keys(porF).map(function (k) { return porF[k]; });
@@ -421,7 +427,6 @@
     var podeLancar = pode('efetivo.lancar');
     var obras = base.obras.filter(function (o) { return o.situacao === 'ativa'; });
     var ativos = base.funcionarios.filter(function (f) { return f.situacao === 'ativo'; });
-    var equipes = base.equipes.filter(function (e) { return e.situacao === 'ativa'; });
     var obraS = selecao([['', 'Selecione a obra']].concat(obras.map(function (o) { return [o.id, nomeObra(o)]; })), S.efObra || '');
     var dataI = el('input', { type: 'date', value: S.efData || hojeISO() });
     var modo = S.efModo || 'grupo';
@@ -441,7 +446,7 @@
     pintarModo();
 
     async function registrosDoDia() {
-      try { return await consulta(sb.from('registros_diarios').select('id,funcionario_id,status,obra_id,observacao,atividade,equipe_id').eq('data', dataI.value).is('excluido_em', null)); }
+      try { return await consulta(sb.from('registros_diarios').select('id,funcionario_id,status,obra_id,observacao,atividade').eq('data', dataI.value).is('excluido_em', null)); }
       catch (e) { if (falhaRede(e)) return null; throw e; }
     }
     function botoesSituacao(atual, aoEscolher) {
@@ -480,18 +485,19 @@
     }
 
     function montarGrupo(daObra, outra, mapaO) {
-      var estado = ativos.map(function (f) {
+      // ativos + quem já tem registro nesta obra/data (desligado aparece só no histórico dele, para não perder o registro)
+      var pessoas = base.funcionarios.filter(function (f) { return f.situacao === 'ativo' || daObra[f.id]; });
+      var estado = pessoas.map(function (f) {
         var r = daObra[f.id];
-        return { f: f, incluido: !!r, status: r ? r.status : '', atividade: r ? (r.atividade || '') : '', equipe_id: r ? (r.equipe_id || '') : '', observacao: r ? (r.observacao || '') : '', bloqueio: outra[f.id] ? mapaO[outra[f.id].obra_id] : null };
+        return { f: f, incluido: !!r, status: r ? r.status : '', atividade: r ? (r.atividade || '') : '', observacao: r ? (r.observacao || '') : '', bloqueio: outra[f.id] ? mapaO[outra[f.id].obra_id] : null };
       });
-      var eqS = selecao([['', 'Sem equipe']].concat(equipes.map(function (e) { return [e.id, e.nome]; })), '');
       var atvI = el('textarea', { rows: '2', placeholder: 'Descreva a atividade executada (texto livre)' });
       var busca = el('input', { type: 'search', placeholder: 'Pesquisar por nome ou matrícula' });
       var aplicar = el('button', { type: 'button', class: 'btn sec min', text: 'Aplicar aos marcados' });
       var todosP = el('button', { type: 'button', class: 'btn sec min', text: 'Marcar todos como Presente' });
       var lista = el('ul', { class: 'lista' });
       var contador = el('b'), salvarB = el('button', { type: 'button', class: 'btn', text: 'Salvar chamada' }), aviso = el('p', { class: 'nota', role: 'status' });
-      area.appendChild(el('div', { class: 'grupoBox' }, [el('label', {}, ['Equipe', eqS]), el('label', {}, ['Atividade executada', atvI]),
+      area.appendChild(el('div', { class: 'grupoBox' }, [el('label', {}, ['Atividade executada', atvI]),
         el('div', { class: 'acoes', style: 'align-self:end' }, [aplicar, todosP])]));
       area.appendChild(busca);
       area.appendChild(lista);
@@ -505,15 +511,14 @@
           var li = el('li', { class: 'pessoa' + (e.incluido ? '' : ' fora') });
           var chk = el('input', { type: 'checkbox' }); chk.checked = e.incluido; chk.disabled = !podeLancar || !!e.bloqueio;
           chk.onchange = function () { e.incluido = chk.checked; if (e.incluido && !e.status) e.status = 'PRESENTE'; contar(); pintar(); };
-          li.appendChild(el('label', { class: 'lin' }, [chk, el('span', { class: 'nm' }, [el('b', { text: e.f.nome }), el('small', { text: (e.f.matricula || 's/ matrícula') + ' · ' + (e.f.funcao_texto || '') })])]));
+          li.appendChild(el('label', { class: 'lin' }, [chk, el('span', { class: 'nm' }, [el('b', { text: e.f.nome }), el('small', { text: (e.f.matricula || 's/ matrícula') + ' · ' + (e.f.funcao_texto || '') + (e.f.situacao !== 'ativo' ? ' · DESLIGADO' + (e.f.desligado_em ? ' em ' + dataBR(e.f.desligado_em) : '') : '') })])]));
           if (e.bloqueio) { li.appendChild(el('p', { class: 'msg av', text: 'Já registrado em outra obra nesta data: ' + nomeObra(e.bloqueio) })); }
           else if (e.incluido) {
             li.appendChild(botoesSituacao(e.status, function (s) { e.status = s; }));
-            var det = el('details', {}, [el('summary', { text: 'Atividade, equipe e observação deste funcionário', style: 'font-size:13px;color:#394086;cursor:pointer;min-height:32px' })]);
+            var det = el('details', {}, [el('summary', { text: 'Atividade e observação deste funcionário', style: 'font-size:13px;color:#394086;cursor:pointer;min-height:32px' })]);
             var a = el('input', { value: e.atividade, placeholder: 'Atividade (se diferente do grupo)' }); a.oninput = function () { e.atividade = a.value; };
-            var q = selecao([['', 'Equipe do grupo']].concat(equipes.map(function (x) { return [x.id, x.nome]; })), e.equipe_id); q.onchange = function () { e.equipe_id = q.value; };
             var o = el('input', { value: e.observacao, placeholder: 'Observação (opcional)' }); o.oninput = function () { e.observacao = o.value; };
-            det.appendChild(el('div', { class: 'extra' }, [a, q, o]));
+            det.appendChild(el('div', { class: 'extra' }, [a, o]));
             li.appendChild(det);
           }
           lista.appendChild(li);
@@ -521,7 +526,7 @@
         contar();
       }
       busca.oninput = pintar;
-      aplicar.onclick = function () { estado.forEach(function (e) { if (e.incluido) { if (atvI.value.trim()) e.atividade = atvI.value.trim(); if (eqS.value) e.equipe_id = eqS.value; } }); pintar(); toast('Atividade e equipe aplicadas aos marcados. Cada um ainda pode ser ajustado.', 'ok'); };
+      aplicar.onclick = function () { estado.forEach(function (e) { if (e.incluido) { if (atvI.value.trim()) e.atividade = atvI.value.trim(); } }); pintar(); toast('Atividade aplicada aos marcados. Cada um ainda pode ser ajustado.', 'ok'); };
       todosP.onclick = function () { estado.forEach(function (e) { if (!e.bloqueio) { e.incluido = true; e.status = e.status || 'PRESENTE'; } }); pintar(); };
       salvarB.onclick = async function () {
         var sel = estado.filter(function (e) { return e.incluido; });
@@ -530,8 +535,8 @@
         if (!confirm('Salvar a chamada de ' + sel.length + ' funcionário(s) em ' + obraS.options[obraS.selectedIndex].text + ' — ' + dataBR(dataI.value) + '?' +
           (removidos ? '\n\n' + removidos + ' funcionário(s) desmarcado(s) terão o registro desta obra/data marcado como excluído (o histórico é preservado).' : ''))) return;
         salvarB.disabled = true; aviso.textContent = 'Salvando…';
-        var itens = sel.map(function (e) { return { funcionario_id: e.f.id, status: e.status, observacao: e.observacao || '', atividade: e.atividade || atvI.value.trim(), equipe_id: e.equipe_id || eqS.value || '', client_uuid: novoId(), registrado_em: new Date().toISOString() }; });
-        var lote = (atvI.value.trim() || eqS.value) ? { atividade: atvI.value.trim(), equipe_id: eqS.value, client_uuid: novoId() } : null;
+        var itens = sel.map(function (e) { return { funcionario_id: e.f.id, status: e.status, observacao: e.observacao || '', atividade: e.atividade || atvI.value.trim(), client_uuid: novoId(), registrado_em: new Date().toISOString() }; });
+        var lote = atvI.value.trim() ? { atividade: atvI.value.trim(), client_uuid: novoId() } : null;
         try {
           var r = await enviar(obraS.value, itens, true, lote, obraS.options[obraS.selectedIndex].text);
           if (r.offline) { aviso.textContent = 'Sem internet: chamada guardada neste aparelho e marcada como NÃO SINCRONIZADA. Será enviada sozinha.'; toast('Guardado no aparelho. Será enviado quando a internet voltar.', 'av'); }
@@ -546,18 +551,17 @@
       var funcS = selecao([['', 'Selecione o funcionário']].concat(ativos.map(function (f) { return [f.id, f.nome + (f.matricula ? ' (' + f.matricula + ')' : '')]; })), '');
       var info = el('div'), status = '';
       var atv = el('textarea', { rows: '2', placeholder: 'Atividade executada (texto livre)' });
-      var eq = selecao([['', 'Sem equipe']].concat(equipes.map(function (x) { return [x.id, x.nome]; })), '');
       var obs = el('input', { placeholder: 'Observação (opcional)' });
       var sitBox = el('div');
       var salvarB = el('button', { type: 'button', class: 'btn', text: 'Salvar apontamento' });
       area.appendChild(el('div', { class: 'card', style: 'display:grid;gap:12px' }, [el('label', {}, ['Funcionário', funcS]), info,
         el('div', {}, [el('p', { class: 'nota', text: 'Situação' }), sitBox]),
-        el('div', { class: 'form' }, [el('label', {}, ['Atividade', atv]), el('label', {}, ['Equipe', eq]), el('label', {}, ['Observação', obs])]), salvarB]));
+        el('div', { class: 'form' }, [el('label', {}, ['Atividade', atv]), el('label', {}, ['Observação', obs])]), salvarB]));
       salvarB.disabled = !podeLancar;
       function pintarSit() { limpar(sitBox).appendChild(botoesSituacao(status, function (s) { status = s; })); }
       funcS.onchange = function () {
         limpar(info); var id = funcS.value, r = daObra[id], o = outra[id];
-        status = r ? r.status : 'PRESENTE'; atv.value = r ? (r.atividade || '') : ''; eq.value = r ? (r.equipe_id || '') : ''; obs.value = r ? (r.observacao || '') : '';
+        status = r ? r.status : 'PRESENTE'; atv.value = r ? (r.atividade || '') : ''; obs.value = r ? (r.observacao || '') : '';
         if (r) info.appendChild(el('p', { class: 'msg ok', text: 'Já registrado nesta obra hoje como ' + (ROTULO_SIT[r.status] || r.status) + '. Salvar altera o registro.' }));
         if (o) info.appendChild(el('p', { class: 'msg av', text: 'Já registrado em outra obra nesta data: ' + nomeObra(mapaO[o.obra_id]) + '. Corrija lá antes.' }));
         salvarB.disabled = !podeLancar || !!o || !id;
@@ -568,7 +572,7 @@
         if (!funcS.value) { toast('Selecione o funcionário.', 'er'); return; }
         salvarB.disabled = true;
         try {
-          var r = await enviar(obraS.value, [{ funcionario_id: funcS.value, status: status, atividade: atv.value.trim(), equipe_id: eq.value, observacao: obs.value.trim(), client_uuid: novoId(), registrado_em: new Date().toISOString() }], false, null, obraS.options[obraS.selectedIndex].text);
+          var r = await enviar(obraS.value, [{ funcionario_id: funcS.value, status: status, atividade: atv.value.trim(), observacao: obs.value.trim(), client_uuid: novoId(), registrado_em: new Date().toISOString() }], false, null, obraS.options[obraS.selectedIndex].text);
           if (r.offline) toast('Sem internet: apontamento guardado no aparelho e marcado como não sincronizado.', 'av');
           else { toast('Apontamento salvo.', 'ok'); await carregar(); }
         } catch (e) { toast(erroTexto(e), 'er'); }
@@ -580,10 +584,10 @@
 
   /* ================= PÁGINA: FUNCIONÁRIOS ================= */
   async function pgFuncionarios(c) {
-    var base = await carregarBase(true), podeEditar = pode('funcionarios.editar');
+    var base = await carregarBase(true), podeEditar = pode('funcionarios.editar'), podeDesligar = pode('funcionarios.desligar');
     var profs = await consulta(sb.from('profissoes').select('id,nome').order('nome'));
     var busca = el('input', { type: 'search', placeholder: 'Pesquisar por nome, matrícula ou função' });
-    var filtro = selecao([['ativo', 'Ativos'], ['inativo', 'Inativos'], ['', 'Todos']], 'ativo');
+    var filtro = selecao([['ativo', 'Ativos'], ['desligado', 'Desligados'], ['', 'Todos']], 'ativo');
     var form = el('div', { class: 'card', hidden: true }), tabela = el('div', { class: 'tw' }), hist = el('div');
     var novo = el('button', { type: 'button', class: 'btn', text: 'Adicionar funcionário' }); novo.hidden = !podeEditar;
     limpar(c);
@@ -597,10 +601,11 @@
       limpar(form); form.hidden = false;
       var nome = el('input', { value: f ? f.nome : '', required: true }), mat = el('input', { value: f ? (f.matricula || '') : '', inputmode: 'numeric' });
       var fun = el('input', { value: f ? (f.funcao_texto || '') : '', list: 'dlProf' }), adm = el('input', { type: 'date', value: f && f.admissao ? f.admissao : '' });
+      var cpf = el('input', { value: f ? (f.cpf || '') : '', inputmode: 'numeric', placeholder: 'opcional' });
       var msg = el('p', { class: 'msg er', hidden: true });
       var salvar = el('button', { type: 'button', class: 'btn', text: 'Salvar' }), cancelar = el('button', { type: 'button', class: 'btn sec', text: 'Cancelar' });
       form.appendChild(el('h2', { text: f ? 'Editar funcionário' : 'Novo funcionário', style: 'margin-bottom:12px' }));
-      form.appendChild(el('div', { class: 'form' }, [el('label', {}, ['Nome completo *', nome]), el('label', {}, ['Matrícula', mat]), el('label', {}, ['Função', fun]), el('label', {}, ['Admissão', adm])]));
+      form.appendChild(el('div', { class: 'form' }, [el('label', {}, ['Nome completo *', nome]), el('label', {}, ['Matrícula', mat]), el('label', {}, ['Função', fun]), el('label', {}, ['Admissão', adm]), el('label', {}, ['CPF', cpf])]));
       form.appendChild(el('div', { class: 'acoes', style: 'margin-top:12px' }, [salvar, cancelar])); form.appendChild(msg);
       cancelar.onclick = function () { form.hidden = true; };
       salvar.onclick = async function () {
@@ -613,7 +618,8 @@
             if (!p) { p = await consulta(sb.from('profissoes').insert({ nome: funcao }).select('id,nome').single()); profs.push(p); }
             profId = p.id;
           }
-          var dados = { nome: n, matricula: mat.value.trim() || null, funcao_texto: funcao || null, profissao_id: profId, admissao: adm.value || null };
+          var cpfN = cpf.value.replace(/\D/g, ''); if (cpfN && cpfN.length !== 11) throw new Error('CPF deve ter 11 dígitos.');
+          var dados = { nome: n, matricula: mat.value.trim() || null, funcao_texto: funcao || null, profissao_id: profId, admissao: adm.value || null, cpf: cpfN ? cpfN.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4') : null };
           if (f) await consulta(sb.from('funcionarios').update(dados).eq('id', f.id));
           else await consulta(sb.from('funcionarios').insert(dados));
           form.hidden = true; toast(f ? 'Funcionário atualizado.' : 'Funcionário cadastrado.', 'ok');
@@ -630,7 +636,17 @@
       var mapaO = {}; base.obras.forEach(function (o) { mapaO[o.id] = o; });
       var regs = await consulta(sb.from('registros_diarios').select('data,status,obra_id,atividade,excluido_em,motivo_exclusao').eq('funcionario_id', f.id).order('data', { ascending: false }).limit(120));
       box.removeChild(box.lastChild);
-      if (!regs.length) { box.appendChild(el('p', { class: 'nota', text: 'Sem registros.' })); return; }
+      if (f.situacao !== 'ativo') box.appendChild(el('p', { class: 'msg av', text: 'DESLIGADO' + (f.desligado_em ? ' em ' + dataBR(f.desligado_em) : '') + (f.desligamento_motivo ? ' · ' + f.desligamento_motivo : '') + (f.desligamento_registrado_por_nome ? ' · registrado por ' + f.desligamento_registrado_por_nome + ' em ' + dataHoraBR(f.desligamento_registrado_em) : '') }));
+      if (S.usuario.perfil === 'ADM') {
+        var cts = await consulta(sb.from('contratos_situacao').select('admissao,periodo1_dias,periodo2_dias,vencimento1,vencimento2,situacao').eq('funcionario_id', f.id).order('admissao', { ascending: false }));
+        box.appendChild(el('h2', { text: 'Contratos de trabalho (' + cts.length + ')', style: 'font-size:15px;margin:8px 0 4px' }));
+        cts.forEach(function (k) { box.appendChild(el('p', { class: 'nota', text: 'Admissão ' + dataBR(k.admissao) + ' · ' + k.periodo1_dias + (k.periodo2_dias ? ' + ' + k.periodo2_dias : '') + ' dias · venc. ' + dataBR(k.vencimento1) + (k.vencimento2 ? ' / prorrogação ' + dataBR(k.vencimento2) : '') + ' · ' + (ROT_SIT_CONTRATO[k.situacao] || k.situacao) })); });
+      }
+      var fis = await consulta(sb.from('fichas_avaliacao').select('*').eq('funcionario_id', f.id).order('emitida_em', { ascending: false }));
+      box.appendChild(el('h2', { text: 'Fichas de avaliação (' + fis.length + ')', style: 'font-size:15px;margin:8px 0 4px' }));
+      fis.forEach(function (x) { box.appendChild(el('div', { class: 'acoes' }, [el('span', { class: 'nota', text: 'Nº ' + x.numero + ' · ' + dataHoraBR(x.emitida_em) + ' · ' + (ROT_SIT_FICHA[x.situacao] || x.situacao) + (x.media != null ? ' · média ' + Number(x.media).toFixed(2) : '') }), el('button', { type: 'button', class: 'btn sec min', text: 'Imprimir', onclick: function () { imprimirFicha(x); } })])); });
+      box.appendChild(el('h2', { text: 'Efetivo diário (últimos 120 registros)', style: 'font-size:15px;margin:8px 0 4px' }));
+      if (!regs.length) { box.appendChild(el('p', { class: 'nota', text: 'Sem registros.' })); box.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Fechar histórico', style: 'margin-top:10px', onclick: function () { limpar(hist); } })); return; }
       var tb = el('tbody');
       regs.forEach(function (r) { tb.appendChild(el('tr', { style: r.excluido_em ? 'opacity:.55' : '' }, [el('td', { text: dataBR(r.data) }), el('td', { text: (ROTULO_SIT[r.status] || r.status) + (r.excluido_em ? ' (excluído: ' + (r.motivo_exclusao || '') + ')' : '') }), el('td', { text: r.obra_id ? nomeObra(mapaO[r.obra_id]) : '' }), el('td', { text: r.atividade || '' })])); });
       box.appendChild(el('div', { class: 'tw' }, [el('table', {}, [el('thead', {}, [el('tr', {}, [el('th', { text: 'Data' }), el('th', { text: 'Situação' }), el('th', { text: 'Obra' }), el('th', { text: 'Atividade' })])]), tb])]));
@@ -639,25 +655,43 @@
     function pintar() {
       var t = chave(busca.value), tb = el('tbody'), n = 0;
       base.funcionarios.forEach(function (f) {
-        if (filtro.value && f.situacao !== filtro.value) return;
+        if (filtro.value === 'ativo' && f.situacao !== 'ativo') return;
+        if (filtro.value === 'desligado' && f.situacao === 'ativo') return;
         if (t && chave(f.nome + ' ' + (f.matricula || '') + ' ' + (f.funcao_texto || '')).indexOf(t) < 0) return;
         n++;
         var acoes = el('div', { class: 'acoes' });
         acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Histórico', onclick: function () { historico(f).catch(function (e) { toast(erroTexto(e), 'er'); }); } }));
-        if (podeEditar) {
-          acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Editar', onclick: function () { abrirForm(f); } }));
-          var inat = f.situacao === 'inativo';
-          acoes.appendChild(el('button', { type: 'button', class: 'btn min ' + (inat ? 'sec' : 'perigo'), text: inat ? 'Reativar' : 'Inativar', onclick: async function () {
-            if (!confirm((inat ? 'Reativar ' : 'Inativar ') + f.nome + '? O histórico é sempre preservado.')) return;
-            try { await consulta(sb.from('funcionarios').update({ situacao: inat ? 'ativo' : 'inativo' }).eq('id', f.id)); base = await carregarBase(true); pintar(); toast('Situação atualizada.', 'ok'); } catch (e) { toast(erroTexto(e), 'er'); }
+        if (podeEditar) acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Editar', onclick: function () { abrirForm(f); } }));
+        if (podeDesligar) {
+          if (f.situacao === 'ativo') acoes.appendChild(el('button', { type: 'button', class: 'btn min perigo', text: 'Desligar', onclick: function () { abrirDesligamento(f); } }));
+          else acoes.appendChild(el('button', { type: 'button', class: 'btn min sec', text: 'Reativar', onclick: async function () {
+            var m = prompt('Reativar ' + f.nome + '? Informe o motivo (fica no histórico):'); if (!m) return;
+            try { await rpc('reativar_funcionario', { p_funcionario: f.id, p_motivo: m }); base = await carregarBase(true); pintar(); toast('Funcionário reativado.', 'ok'); } catch (e) { toast(erroTexto(e), 'er'); }
           } }));
         }
         tb.appendChild(el('tr', {}, [el('td', { text: f.nome }), el('td', { text: f.matricula || '' }), el('td', { text: f.funcao_texto || '' }), el('td', { text: f.admissao ? dataBR(f.admissao) : '' }),
-          el('td', {}, [el('span', { class: 'selo ' + (f.situacao === 'ativo' ? 'ok' : 'ne'), text: f.situacao })]), el('td', { text: f.pendencias || '', style: 'font-size:13px;color:#8a5a00' }), el('td', {}, [acoes])]));
+          el('td', {}, [el('span', { class: 'selo ' + (f.situacao === 'ativo' ? 'ok' : 'ne'), text: f.situacao === 'ativo' ? 'Ativo' : 'Desligado' + (f.desligado_em ? ' em ' + dataBR(f.desligado_em) : '') })]), el('td', { text: f.pendencias || '', style: 'font-size:13px;color:#8a5a00' }), el('td', {}, [acoes])]));
       });
       limpar(tabela);
       tabela.appendChild(el('p', { class: 'nota', text: n + ' funcionário(s)', style: 'margin-bottom:8px' }));
       tabela.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, ['Nome', 'Matrícula', 'Função', 'Admissão', 'Situação', 'Pendências', ''].map(function (h) { return el('th', { text: h }); }))]), tb]));
+    }
+    function abrirDesligamento(f) {
+      limpar(form); form.hidden = false;
+      var dt = el('input', { type: 'date', value: hojeISO() }), mot = el('input', { placeholder: 'Motivo (opcional)' });
+      var ok = el('button', { type: 'button', class: 'btn perigo', text: 'Registrar desligamento' });
+      form.appendChild(el('h2', { text: 'Desligar ' + f.nome, style: 'margin-bottom:8px' }));
+      form.appendChild(el('p', { class: 'nota', text: 'O funcionário sai das novas chamadas e transferências. Nada é apagado: registros anteriores, relatórios, contratos e fichas continuam no histórico.' }));
+      form.appendChild(el('div', { class: 'form' }, [el('label', {}, ['Data do desligamento *', dt]), el('label', {}, ['Motivo', mot])]));
+      form.appendChild(el('div', { class: 'acoes', style: 'margin-top:12px' }, [ok, el('button', { type: 'button', class: 'btn sec', text: 'Cancelar', onclick: function () { form.hidden = true; } })]));
+      ok.onclick = async function () {
+        if (!dt.value) { toast('Informe a data.', 'er'); return; }
+        if (!confirm('Confirmar o desligamento de ' + f.nome + ' em ' + dataBR(dt.value) + '?')) return;
+        ok.disabled = true;
+        try { await rpc('desligar_funcionario', { p_funcionario: f.id, p_data: dt.value, p_motivo: mot.value }); form.hidden = true; base = await carregarBase(true); pintar(); toast('Desligamento registrado.', 'ok'); }
+        catch (e) { toast(erroTexto(e), 'er'); } finally { ok.disabled = false; }
+      };
+      form.scrollIntoView({ behavior: 'smooth' });
     }
     busca.oninput = pintar; filtro.onchange = pintar; novo.onclick = function () { abrirForm(null); };
     pintar();
@@ -703,44 +737,459 @@
     busca.oninput = pintar; novo.onclick = function () { abrirForm(null); }; pintar();
   }
 
-  /* ================= PÁGINA: EQUIPES ================= */
-  async function pgEquipes(c) {
-    var base = await carregarBase(true), podeEditar = pode('equipes.editar');
-    var obras = base.obras.filter(function (o) { return o.situacao === 'ativa'; }), mapaO = {}; base.obras.forEach(function (o) { mapaO[o.id] = o; });
-    var form = el('div', { class: 'card', hidden: true }), tabela = el('div', { class: 'tw' });
-    var novo = el('button', { type: 'button', class: 'btn', text: 'Cadastrar equipe' }); novo.hidden = !podeEditar;
+  /* ================= PÁGINA: CONTRATOS DE TRABALHO (somente ADM — conferido também no banco) ================= */
+  var ROT_SIT_CONTRATO = { EM_EXPERIENCIA: 'Em experiência', PRORROGADO: 'Prorrogado', EFETIVADO: 'Efetivado', ENCERRADO: 'Encerrado', PENDENTE_DECISAO: 'Decisão pendente', CANCELADO: 'Cancelado' };
+  var ROT_ALERTA = { VENCIDO_SEM_DECISAO: ['Vencido sem decisão', 'er'], VENCE_EM_BREVE: ['Vence em breve', 'av'], DECISAO_PENDENTE: ['Decisão pendente', 'av'], EM_DIA: ['Em dia', 'ok'], CONCLUIDO: ['Concluído', 'ne'] };
+  async function lerConfigRH() {
+    var l = await consulta(sb.from('rh_config').select('chave,valor'));
+    var c = {}; l.forEach(function (x) { c[x.chave] = x.valor; });
+    return { auto: c.renovacao_automatica !== false, p1: Number(c.periodo1_padrao_dias || 45), p2: Number(c.periodo2_padrao_dias || 45), alerta: Number(c.alerta_antecedencia_dias || 7) };
+  }
+  async function pgContratos(c) {
+    if (S.usuario.perfil !== 'ADM') { limpar(c).appendChild(el('p', { class: 'msg er', text: 'Somente administradores acessam Contratos de Trabalho.' })); return; }
+    var base = await carregarBase(true), cfg = await lerConfigRH();
+    var busca = el('input', { type: 'search', placeholder: 'Pesquisar por nome ou matrícula' });
+    var fAlerta = selecao([['', 'Todos os alertas'], ['VENCIDO_SEM_DECISAO', 'Vencidos sem decisão'], ['VENCE_EM_BREVE', 'Vencem em breve'], ['DECISAO_PENDENTE', 'Decisão pendente'], ['EM_DIA', 'Em dia'], ['CONCLUIDO', 'Concluídos']], S.ctAlerta || '');
+    var fSit = selecao([['', 'Todas as situações']].concat(Object.keys(ROT_SIT_CONTRATO).map(function (k) { return [k, ROT_SIT_CONTRATO[k]]; })), '');
+    var kpis = el('div', { class: 'kpis' }), painel = el('div'), tabela = el('div', { class: 'tw' });
+    var bImp = el('button', { type: 'button', class: 'btn', text: 'Importar planilha de contratos' });
+    var bNovo = el('button', { type: 'button', class: 'btn sec', text: 'Novo contrato' });
+    var bCfg = el('button', { type: 'button', class: 'btn sec', text: 'Configuração' });
     limpar(c);
-    c.appendChild(el('div', { class: 'cab' }, [el('h1', { class: 'tit', text: 'Equipes' }), novo]));
-    c.appendChild(el('p', { class: 'nota', text: 'As equipes cadastradas aparecem para seleção no Efetivo Diário.' }));
-    c.appendChild(form); c.appendChild(el('section', { class: 'card' }, [tabela]));
-    function abrirForm(eq) {
-      limpar(form); form.hidden = false;
-      var nome = el('input', { value: eq ? eq.nome : '' }), ob = selecao([['', 'Todas as obras']].concat(obras.map(function (o) { return [o.id, nomeObra(o)]; })), eq ? eq.obra_id : '');
-      var sit = selecao([['ativa', 'Ativa'], ['inativa', 'Inativa']], eq ? eq.situacao : 'ativa');
-      var msg = el('p', { class: 'msg er', hidden: true }), salvar = el('button', { type: 'button', class: 'btn', text: 'Salvar' });
-      form.appendChild(el('div', { class: 'form' }, [el('label', {}, ['Nome da equipe *', nome]), el('label', {}, ['Obra (opcional)', ob]), el('label', {}, ['Situação', sit])]));
-      form.appendChild(el('div', { class: 'acoes', style: 'margin-top:12px' }, [salvar, el('button', { type: 'button', class: 'btn sec', text: 'Cancelar', onclick: function () { form.hidden = true; } })])); form.appendChild(msg);
-      salvar.onclick = async function () {
-        var n = nome.value.replace(/\s+/g, ' ').trim(); if (!n) { msg.hidden = false; msg.textContent = 'Informe o nome.'; return; }
-        salvar.disabled = true;
-        try {
-          var d = { nome: n, obra_id: ob.value || null, situacao: sit.value };
-          if (eq) await consulta(sb.from('equipes').update(d).eq('id', eq.id)); else await consulta(sb.from('equipes').insert(d));
-          form.hidden = true; toast('Equipe salva.', 'ok'); base = await carregarBase(true); pintar();
-        } catch (e) { msg.hidden = false; msg.textContent = erroTexto(e); } finally { salvar.disabled = false; }
-      };
+    c.appendChild(el('div', { class: 'cab' }, [el('h1', { class: 'tit', text: 'Contratos de Trabalho' }), el('div', { class: 'acoes' }, [bImp, bNovo, bCfg])]));
+    c.appendChild(el('p', { class: 'nota', text: 'Contratos de experiência. Renovação automática: ' + (cfg.auto ? 'LIGADA (' + cfg.p1 + ' + ' + cfg.p2 + ' dias)' : 'DESLIGADA (só o 1º período: ' + cfg.p1 + ' dias)') +
+      '. O sistema controla prazos e alertas; a decisão de prorrogar, efetivar ou encerrar é sempre registrada pelo RH.' }));
+    c.appendChild(kpis); c.appendChild(painel);
+    c.appendChild(el('div', { class: 'filtros' }, [el('label', { style: 'flex:1;min-width:220px' }, ['Pesquisar', busca]), el('label', {}, ['Alerta', fAlerta]), el('label', {}, ['Situação', fSit])]));
+    c.appendChild(el('section', { class: 'card' }, [tabela]));
+    var lista = [];
+    async function carregar() {
+      lista = await consulta(sb.from('contratos_situacao').select('*').order('proximo_vencimento', { ascending: true, nullsFirst: false }));
+      limpar(kpis);
+      [['VENCIDO_SEM_DECISAO', 'color:#b00e0e'], ['VENCE_EM_BREVE', 'color:#8a5a00'], ['DECISAO_PENDENTE', 'color:#8a5a00'], ['EM_DIA', 'color:#394086'], ['CONCLUIDO', '']].forEach(function (k) {
+        var n = lista.filter(function (x) { return x.alerta === k[0]; }).length;
+        var card = el('button', { type: 'button', class: 'card kpi', style: 'text-align:left;cursor:pointer;border:0', onclick: function () { fAlerta.value = k[0]; S.ctAlerta = k[0]; pintar(); } },
+          [el('small', { text: ROT_ALERTA[k[0]][0] }), el('b', { text: n, style: k[1] })]);
+        kpis.appendChild(card);
+      });
+      pintar();
     }
     function pintar() {
-      var tb = el('tbody');
-      base.equipes.forEach(function (eq) {
-        tb.appendChild(el('tr', {}, [el('td', { text: eq.nome }), el('td', { text: eq.obra_id ? nomeObra(mapaO[eq.obra_id]) : 'Todas' }), el('td', {}, [el('span', { class: 'selo ' + (eq.situacao === 'ativa' ? 'ok' : 'ne'), text: eq.situacao })]),
-          el('td', {}, [podeEditar ? el('button', { type: 'button', class: 'btn sec min', text: 'Editar', onclick: function () { abrirForm(eq); } }) : null])]));
+      var t = chave(busca.value), tb = el('tbody'), n = 0;
+      lista.forEach(function (x) {
+        if (fAlerta.value && x.alerta !== fAlerta.value) return;
+        if (fSit.value && x.situacao !== fSit.value) return;
+        if (t && chave(x.funcionario_nome + ' ' + (x.matricula || '')).indexOf(t) < 0) return;
+        n++;
+        var al = ROT_ALERTA[x.alerta] || [x.alerta, 'ne'];
+        tb.appendChild(el('tr', {}, [
+          el('td', {}, [el('b', { text: x.funcionario_nome }), el('br'), el('small', { text: (x.matricula || 's/ matrícula') + (x.funcionario_situacao !== 'ativo' ? ' · DESLIGADO' : '') + (x.departamento ? ' · ' + x.departamento : '') })]),
+          el('td', { text: dataBR(x.admissao) }),
+          el('td', { text: dataBR(x.vencimento1) + ' (' + x.periodo1_dias + 'd)' }),
+          el('td', { text: x.vencimento2 ? dataBR(x.vencimento2) + ' (+' + x.periodo2_dias + 'd)' : '—' }),
+          el('td', {}, [el('span', { class: 'selo ' + (x.situacao === 'PENDENTE_DECISAO' ? 'av' : x.situacao === 'EFETIVADO' ? 'ok' : 'ne'), text: ROT_SIT_CONTRATO[x.situacao] || x.situacao })]),
+          el('td', {}, [el('span', { class: 'selo ' + al[1], text: al[0] }), x.proximo_vencimento && x.alerta !== 'CONCLUIDO' ? el('small', { text: ' ' + dataBR(x.proximo_vencimento), style: 'display:block' }) : null]),
+          el('td', {}, [el('button', { type: 'button', class: 'btn sec min', text: 'Abrir', onclick: function () { detalhe(x.id).catch(function (e) { toast(erroTexto(e), 'er'); }); } })])
+        ]));
       });
       limpar(tabela);
-      if (!base.equipes.length) tabela.appendChild(el('p', { class: 'nota', text: 'Nenhuma equipe cadastrada ainda.' }));
-      else tabela.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, ['Equipe', 'Obra', 'Situação', ''].map(function (h) { return el('th', { text: h }); }))]), tb]));
+      tabela.appendChild(el('p', { class: 'nota', text: n + ' contrato(s)', style: 'margin-bottom:8px' }));
+      if (n) tabela.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, ['Funcionário', 'Admissão', '1º vencimento', 'Prorrogação', 'Situação', 'Alerta', ''].map(function (h) { return el('th', { text: h }); }))]), tb]));
     }
-    novo.onclick = function () { abrirForm(null); }; pintar();
+    busca.oninput = pintar; fAlerta.onchange = function () { S.ctAlerta = fAlerta.value; pintar(); }; fSit.onchange = pintar;
+
+    async function detalhe(id) {
+      var x = (await consulta(sb.from('contratos_situacao').select('*').eq('id', id)))[0];
+      var ev = await consulta(sb.from('contratos_eventos').select('*').eq('contrato_id', id).order('em', { ascending: false }));
+      var fichas = await consulta(sb.from('fichas_avaliacao').select('*').eq('contrato_id', id).order('emitida_em', { ascending: false }));
+      limpar(painel);
+      var box = el('section', { class: 'card', style: 'display:grid;gap:10px;border:2px solid #394086' });
+      var aberto = ['EM_EXPERIENCIA', 'PRORROGADO', 'PENDENTE_DECISAO'].indexOf(x.situacao) >= 0;
+      box.appendChild(el('div', { class: 'cab' }, [el('h2', { text: x.funcionario_nome + (x.matricula ? ' · ' + x.matricula : '') }),
+        el('button', { type: 'button', class: 'btn sec min', text: 'Fechar', onclick: function () { limpar(painel); } })]));
+      box.appendChild(el('div', { class: 'form' }, [
+        el('p', {}, [el('small', { text: 'Admissão' }), el('br'), el('b', { text: dataBR(x.admissao) })]),
+        el('p', {}, [el('small', { text: '1º período' }), el('br'), el('b', { text: x.periodo1_dias + ' dias → ' + dataBR(x.vencimento1) })]),
+        el('p', {}, [el('small', { text: '2º período (prorrogação)' }), el('br'), el('b', { text: x.periodo2_dias ? x.periodo2_dias + ' dias → ' + dataBR(x.vencimento2) : 'não definido' })]),
+        el('p', {}, [el('small', { text: 'Situação' }), el('br'), el('b', { text: ROT_SIT_CONTRATO[x.situacao] + (x.decisao_por_nome ? ' · por ' + x.decisao_por_nome + ' em ' + dataHoraBR(x.decisao_em) : '') })]),
+        el('p', {}, [el('small', { text: 'Função / departamento' }), el('br'), el('b', { text: (x.funcao || '—') + ' / ' + (x.departamento || '—') })])
+      ]));
+      if (x.pendencia) box.appendChild(el('p', { class: 'msg av', text: x.pendencia }));
+      if (x.funcionario_situacao !== 'ativo') box.appendChild(el('p', { class: 'msg av', text: 'Funcionário desligado. O contrato e as fichas continuam no histórico.' }));
+      var obs = el('input', { placeholder: 'Observação da decisão (opcional)' });
+      var diasP2 = el('input', { type: 'number', min: '1', max: String(90 - x.periodo1_dias), value: String(x.periodo2_dias || Math.min(cfg.p2, 90 - x.periodo1_dias)), style: 'max-width:120px' });
+      async function acao(nome, args, msgOk) { try { await rpc(nome, args); toast(msgOk, 'ok'); await carregar(); await detalhe(id); } catch (e) { toast(erroTexto(e), 'er'); } }
+      if (aberto) {
+        box.appendChild(el('h2', { text: 'Registrar decisão do RH', style: 'font-size:16px' }));
+        box.appendChild(el('div', { class: 'acoes', style: 'align-items:end' }, [
+          el('label', {}, ['Dias do 2º período', diasP2]),
+          el('button', { type: 'button', class: 'btn', text: 'Prorrogar', onclick: function () {
+            if (90 - x.periodo1_dias < 1) { toast('Este contrato já tem 90 dias no 1º período: não pode ser prorrogado.', 'er'); return; }
+            if (confirm('Registrar PRORROGAÇÃO de ' + diasP2.value + ' dias para ' + x.funcionario_nome + '?')) acao('contrato_decidir', { p_contrato: id, p_decisao: 'PRORROGAR', p_periodo2: Number(diasP2.value), p_obs: obs.value }, 'Prorrogação registrada.');
+          } }),
+          el('button', { type: 'button', class: 'btn sec', text: 'Efetivar', onclick: function () { if (confirm('Registrar EFETIVAÇÃO de ' + x.funcionario_nome + '?')) acao('contrato_decidir', { p_contrato: id, p_decisao: 'EFETIVAR', p_periodo2: null, p_obs: obs.value }, 'Efetivação registrada.'); } }),
+          el('button', { type: 'button', class: 'btn perigo', text: 'Encerrar', onclick: function () { if (confirm('Registrar ENCERRAMENTO do contrato de ' + x.funcionario_nome + '?\n\nIsto não desliga o funcionário: o desligamento é feito em Funcionários.')) acao('contrato_decidir', { p_contrato: id, p_decisao: 'ENCERRAR', p_periodo2: null, p_obs: obs.value }, 'Encerramento registrado.'); } })
+        ]));
+        box.appendChild(obs);
+        var p1 = el('input', { type: 'number', min: '1', max: '90', value: String(x.periodo1_dias), style: 'max-width:110px' });
+        var p2 = el('input', { type: 'number', min: '0', max: '89', value: x.periodo2_dias ? String(x.periodo2_dias) : '', style: 'max-width:110px', placeholder: 'vazio' });
+        var mot = el('input', { placeholder: 'Motivo do ajuste' });
+        box.appendChild(el('details', {}, [el('summary', { text: 'Ajustar prazos deste contrato (ex.: 30 + 60, 60 + 30)', style: 'cursor:pointer;color:#394086' }),
+          el('div', { class: 'acoes', style: 'align-items:end;margin-top:8px' }, [el('label', {}, ['1º período (dias)', p1]), el('label', {}, ['2º período (dias)', p2]), el('label', { style: 'flex:1' }, ['Motivo', mot]),
+            el('button', { type: 'button', class: 'btn sec', text: 'Salvar prazos', onclick: function () { acao('contrato_definir_periodos', { p_contrato: id, p_periodo1: Number(p1.value), p_periodo2: p2.value ? Number(p2.value) : null, p_motivo: mot.value }, 'Prazos atualizados.'); } })])]));
+      }
+      var txtObs = el('input', { placeholder: 'Anotação no histórico do contrato' });
+      box.appendChild(el('div', { class: 'acoes' }, [txtObs, el('button', { type: 'button', class: 'btn sec min', text: 'Anotar', onclick: function () { acao('contrato_observacao', { p_contrato: id, p_texto: txtObs.value }, 'Anotação registrada.'); } }),
+        el('button', { type: 'button', class: 'btn sec min', text: 'Emitir ficha de avaliação', onclick: function () { S.fichaFunc = x.funcionario_id; irPara('fichas'); } }),
+        x.situacao !== 'CANCELADO' ? el('button', { type: 'button', class: 'btn perigo min', text: 'Cancelar contrato', onclick: function () { var m = prompt('Motivo do cancelamento (o registro é preservado):'); if (m) acao('contrato_cancelar', { p_contrato: id, p_motivo: m }, 'Contrato cancelado.'); } }) : null]));
+      box.appendChild(el('h2', { text: 'Fichas de avaliação (' + fichas.length + ')', style: 'font-size:16px' }));
+      if (!fichas.length) box.appendChild(el('p', { class: 'nota', text: 'Nenhuma ficha vinculada.' }));
+      fichas.forEach(function (f) { box.appendChild(el('div', { class: 'acoes' }, [el('span', { text: 'Nº ' + f.numero + ' · ' + dataHoraBR(f.emitida_em) + ' · ' + (ROT_SIT_FICHA[f.situacao] || f.situacao) + (f.media != null ? ' · média ' + Number(f.media).toFixed(2) : '') + (f.parecer ? ' · ' + ROT_PARECER[f.parecer] : '') }),
+        el('button', { type: 'button', class: 'btn sec min', text: 'Imprimir', onclick: function () { imprimirFicha(f); } })])); });
+      box.appendChild(el('h2', { text: 'Histórico do contrato', style: 'font-size:16px' }));
+      var tb = el('tbody');
+      ev.forEach(function (e) { tb.appendChild(el('tr', {}, [el('td', { text: dataHoraBR(e.em) }), el('td', { text: e.tipo }), el('td', { text: e.detalhe || '' }), el('td', { text: e.por_nome || '' })])); });
+      box.appendChild(el('div', { class: 'tw' }, [el('table', {}, [el('thead', {}, [el('tr', {}, ['Quando', 'Evento', 'Detalhe', 'Por'].map(function (h) { return el('th', { text: h }); }))]), tb])]));
+      painel.appendChild(box); box.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    bNovo.onclick = function () {
+      limpar(painel);
+      var ativos = base.funcionarios.filter(function (f) { return f.situacao === 'ativo'; });
+      var fs = selecao([['', 'Selecione o funcionário']].concat(ativos.map(function (f) { return [f.id, f.nome + (f.matricula ? ' (' + f.matricula + ')' : '')]; })), '');
+      var adm = el('input', { type: 'date' }), p1 = el('input', { type: 'number', min: '1', max: '90', value: String(cfg.p1) });
+      var p2 = el('input', { type: 'number', min: '0', max: '89', value: cfg.auto ? String(cfg.p2) : '', placeholder: 'vazio = sem 2º período' }), ob = el('input');
+      fs.onchange = function () { var f = ativos.filter(function (x) { return x.id === fs.value; })[0]; if (f && f.admissao) adm.value = f.admissao; };
+      var salvar = el('button', { type: 'button', class: 'btn', text: 'Criar contrato' });
+      painel.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px' }, [el('h2', { text: 'Novo contrato de experiência' }),
+        el('div', { class: 'form' }, [el('label', {}, ['Funcionário *', fs]), el('label', {}, ['Admissão *', adm]), el('label', {}, ['1º período (dias)', p1]), el('label', {}, ['2º período (dias)', p2]), el('label', {}, ['Observação', ob])]),
+        el('p', { class: 'nota', text: 'Prazos preenchidos pela configuração (' + (cfg.auto ? 'renovação automática ' + cfg.p1 + ' + ' + cfg.p2 : 'só ' + cfg.p1 + ' dias') + '). Altere se o contrato tiver prazos diferentes. Total máximo: 90 dias.' }),
+        el('div', { class: 'acoes' }, [salvar, el('button', { type: 'button', class: 'btn sec', text: 'Cancelar', onclick: function () { limpar(painel); } })])]));
+      salvar.onclick = async function () {
+        if (!fs.value || !adm.value) { toast('Escolha o funcionário e a admissão.', 'er'); return; }
+        salvar.disabled = true;
+        try { var id = await rpc('contrato_criar', { p_funcionario: fs.value, p_admissao: adm.value, p_periodo1: Number(p1.value), p_periodo2: p2.value ? Number(p2.value) : null, p_obs: ob.value }); toast('Contrato criado.', 'ok'); await carregar(); await detalhe(id); }
+        catch (e) { toast(/contratos_func_adm/.test(String(e && e.message)) ? 'Já existe contrato para este funcionário com essa admissão.' : erroTexto(e), 'er'); } finally { salvar.disabled = false; }
+      };
+    };
+
+    bCfg.onclick = function () {
+      limpar(painel);
+      var auto = el('input', { type: 'checkbox' }); auto.checked = cfg.auto;
+      var p1 = el('input', { type: 'number', min: '1', max: '90', value: String(cfg.p1) }), p2 = el('input', { type: 'number', min: '1', max: '89', value: String(cfg.p2) }), al = el('input', { type: 'number', min: '0', max: '60', value: String(cfg.alerta) });
+      var salvar = el('button', { type: 'button', class: 'btn', text: 'Salvar configuração' });
+      painel.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px' }, [el('h2', { text: 'Configuração dos contratos de experiência' }),
+        el('label', { class: 'lin' }, [auto, el('span', { text: 'Renovação automática do contrato de experiência (calcula o 2º período automaticamente nos contratos novos)' })]),
+        el('div', { class: 'form' }, [el('label', {}, ['1º período padrão (dias)', p1]), el('label', {}, ['2º período padrão (dias)', p2]), el('label', {}, ['Alertar quantos dias antes do vencimento', al])]),
+        el('p', { class: 'nota', text: 'Vale para contratos novos. Contratos existentes mantêm os prazos (ajuste em cada contrato, se precisar). A renovação automática só calcula prazos e alertas: a decisão é sempre do RH.' }),
+        el('div', { class: 'acoes' }, [salvar, el('button', { type: 'button', class: 'btn sec', text: 'Fechar', onclick: function () { limpar(painel); } })])]));
+      salvar.onclick = async function () {
+        if (Number(p1.value) + Number(p2.value) > 90) { toast('O total da experiência não pode passar de 90 dias.', 'er'); return; }
+        salvar.disabled = true;
+        try {
+          var pares = [['renovacao_automatica', auto.checked], ['periodo1_padrao_dias', Number(p1.value)], ['periodo2_padrao_dias', Number(p2.value)], ['alerta_antecedencia_dias', Number(al.value)]];
+          for (var i = 0; i < pares.length; i++) await consulta(sb.from('rh_config').update({ valor: pares[i][1] }).eq('chave', pares[i][0]));
+          toast('Configuração salva.', 'ok'); pgContratos(c);
+        } catch (e) { toast(erroTexto(e), 'er'); } finally { salvar.disabled = false; }
+      };
+    };
+
+    bImp.onclick = function () {
+      limpar(painel);
+      var arq = el('input', { type: 'file', accept: '.xls,.xlsx' }), preencher = el('input', { type: 'checkbox' });
+      var res = el('div', { style: 'display:grid;gap:8px' }), linhas = null;
+      painel.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px' }, [el('h2', { text: 'Importar planilha "Vencimentos de Contratos"' }),
+        el('p', { class: 'nota', text: 'Layout do RH: Cod · Nome do Funcionário · Departamento · Função · Admissão · Vencimento Experiência · Prorrogação Experiência. Primeiro é mostrada uma PRÉVIA; nada é gravado até você confirmar. Reimportar o mesmo arquivo não duplica nada.' }),
+        el('label', {}, ['Arquivo (.xls ou .xlsx)', arq]),
+        el('label', { class: 'lin' }, [preencher, el('span', { text: 'Preencher no cadastro apenas campos VAZIOS (admissão, função). Nunca substitui o que já existe.' })]),
+        res, el('button', { type: 'button', class: 'btn sec min', text: 'Fechar', onclick: function () { limpar(painel); } })]));
+      arq.onchange = async function () {
+        limpar(res).appendChild(el('p', { class: 'nota', text: 'Lendo o arquivo…' }));
+        try { linhas = await lerPlanilhaContratos(arq.files[0]); await previa(); }
+        catch (e) { limpar(res).appendChild(el('p', { class: 'msg er', text: erroTexto(e) })); }
+      };
+      function bloco(titulo, itens, fmt, tipo) {
+        var d = el('details', { open: itens.length > 0 && tipo !== 'ok' }, [el('summary', { text: titulo + ': ' + itens.length, style: 'cursor:pointer;font-weight:700' + (tipo === 'er' && itens.length ? ';color:#b00e0e' : '') })]);
+        var ul = el('ul', { style: 'margin:6px 0 0 18px;font-size:14px' }); itens.forEach(function (i) { ul.appendChild(el('li', { text: fmt(i) })); }); d.appendChild(ul); return d;
+      }
+      function mostrar(r) {
+        limpar(res);
+        res.appendChild(el('p', { class: 'msg ' + (r.confirmado ? 'ok' : 'av'), text: r.confirmado ? 'Importação concluída.' : 'PRÉVIA — nada foi gravado ainda. Confira e confirme.' }));
+        res.appendChild(bloco('Linhas lidas', [], function () { return ''; }, 'ok')); res.lastChild.firstChild.textContent = 'Linhas lidas: ' + r.linhas;
+        res.appendChild(bloco('Funcionários encontrados no cadastro', r.funcionarios_encontrados, function (i) { return i.cod + ' — ' + i.nome; }, 'ok'));
+        res.appendChild(bloco('Novos cadastros de funcionário', r.novos_cadastros, function (i) { return i.cod + ' — ' + i.nome + ' (' + (i.funcao || '') + ', admissão ' + dataBR(i.admissao) + ')'; }, 'av'));
+        res.appendChild(bloco('Contratos ' + (r.confirmado ? 'importados' : 'a importar'), r.contratos_novos, function (i) { return i.cod + ' — ' + i.nome + ' · ' + i.periodos + ' dias · ' + (ROT_SIT_CONTRATO[i.situacao] || i.situacao); }, 'ok'));
+        res.appendChild(bloco('Contratos que já existem (não duplicados)', r.contratos_ja_existentes, function (i) { return i.cod + ' — ' + i.nome; }, 'ok'));
+        res.appendChild(bloco('Divergências com o cadastro (cadastro NÃO alterado)', r.divergencias, function (i) { return 'Linha ' + i.linha + ' · ' + i.cod + ' — ' + i.nome + ': ' + i.problema + (i.importa ? '' : ' [não importado]'); }, 'er'));
+        res.appendChild(bloco('Duplicidades no arquivo', r.duplicidades, function (i) { return 'Linha ' + i.linha + ' · ' + i.cod + ' — ' + i.nome + ': ' + i.problema; }, 'er'));
+        res.appendChild(bloco('Inconsistências para o RH analisar', r.inconsistencias, function (i) { return 'Linha ' + i.linha + ' · ' + i.nome + ': ' + i.problema + (i.importa ? ' [importado como pendente]' : ' [não importado]'); }, 'er'));
+        if (!r.confirmado && (r.contratos_novos.length || r.novos_cadastros.length)) {
+          var conf = el('button', { type: 'button', class: 'btn', text: 'Confirmar importação (' + r.contratos_novos.length + ' contrato(s), ' + r.novos_cadastros.length + ' cadastro(s) novo(s))' });
+          conf.onclick = async function () { conf.disabled = true; try { var r2 = await rpc('contratos_importar', { p_linhas: linhas, p_confirmar: true, p_preencher_vazios: preencher.checked }); mostrar(r2); await carregar(); S.cache.base = null; } catch (e) { toast(erroTexto(e), 'er'); conf.disabled = false; } };
+          res.appendChild(conf);
+        }
+      }
+      async function previa() { mostrar(await rpc('contratos_importar', { p_linhas: linhas, p_confirmar: false, p_preencher_vazios: preencher.checked })); }
+      preencher.onchange = function () { if (linhas) previa().catch(function (e) { toast(erroTexto(e), 'er'); }); };
+    };
+    S.recarregarContratos = function () { carregar().catch(function () { /* mantém */ }); };
+    await carregar();
+  }
+
+  // Lê o .xls/.xlsx do RH no próprio aparelho (SheetJS, carregado só quando necessário).
+  function carregarSheetJS() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    return new Promise(function (ok, falha) {
+      var s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      s.onload = function () { ok(window.XLSX); }; s.onerror = function () { falha(new Error('Não foi possível carregar o leitor de planilhas. Verifique a internet.')); };
+      document.head.appendChild(s);
+    });
+  }
+  async function lerPlanilhaContratos(arquivo) {
+    if (!arquivo) throw new Error('Escolha o arquivo.');
+    var X = await carregarSheetJS();
+    var wb = X.read(await arquivo.arrayBuffer(), { type: 'array' });
+    var ws = wb.Sheets[wb.SheetNames[0]];
+    var m = X.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+    var iCab = -1, col = {};
+    for (var i = 0; i < Math.min(m.length, 15) && iCab < 0; i++) {
+      var r = m[i].map(chave);
+      if (r.indexOf('cod') >= 0 && r.some(function (c) { return c.indexOf('nome') === 0; })) {
+        iCab = i;
+        r.forEach(function (c, j) {
+          if (c === 'cod') col.cod = j; else if (c.indexOf('nome') === 0) col.nome = j; else if (c.indexOf('departamento') === 0) col.dep = j;
+          else if (c.indexOf('funcao') === 0) col.fun = j; else if (c.indexOf('admissao') === 0) col.adm = j;
+          else if (c.indexOf('vencimento') === 0) col.venc = j; else if (c.indexOf('prorrogacao') === 0) col.pror = j;
+        });
+      }
+    }
+    if (iCab < 0 || col.adm == null || col.venc == null) throw new Error('Layout não reconhecido: falta o cabeçalho "Cod / Nome do Funcionário / Admissão / Vencimento Experiência".');
+    function data(v) {
+      if (v === '' || v == null) return '';
+      if (typeof v === 'number') { var d = X.SSF.parse_date_code(v); return d ? d.y + '-' + String(d.m).padStart(2, '0') + '-' + String(d.d).padStart(2, '0') : ''; }
+      var t = String(v).trim(), b = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (b) return b[3] + '-' + b[2].padStart(2, '0') + '-' + b[1].padStart(2, '0');
+      return /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : t;   // texto (ex.: "PRORROGAR?") segue como está
+    }
+    var out = [];
+    for (var k = iCab + 1; k < m.length; k++) {
+      var l = m[k]; if (!String(l[col.cod] || '').trim() && !String(l[col.nome] || '').trim()) continue;
+      out.push({ linha: k + 1, cod: String(l[col.cod]).trim(), nome: String(l[col.nome] || '').trim(), departamento: col.dep != null ? String(l[col.dep] || '').trim() : '',
+        funcao: col.fun != null ? String(l[col.fun] || '').trim() : '', admissao: data(l[col.adm]), vencimento: data(l[col.venc]), prorrogacao: col.pror != null ? data(l[col.pror]) : '' });
+    }
+    if (!out.length) throw new Error('Nenhum contrato encontrado no arquivo.');
+    return out;
+  }
+
+  /* ================= PÁGINA: FICHAS DE AVALIAÇÃO (todos os usuários autenticados) ================= */
+  var CRITERIOS = [
+    ['assiduidade', '1) Assiduidade', 'Comparecimento regular ao trabalho, sem faltas injustificadas.'],
+    ['conhecimento', '2) Conhecimento técnico', 'Domínio das atividades da função e da execução correta e segura.'],
+    ['equipe', '3) Trabalho em equipe', 'Colaboração com colegas e liderança, bom relacionamento.'],
+    ['pontualidade', '4) Pontualidade', 'Cumprimento dos horários de entrada, saída e intervalos.'],
+    ['dinamico', '5) Dinâmico', 'Proatividade, iniciativa e agilidade na execução das tarefas.'],
+    ['disponibilidade', '6) Disponibilidade fora da jornada', 'Disponibilidade para horas extras, fins de semana e paradas.'],
+    ['zelo', '7) Zelo dos equipamentos e materiais', 'Cuidado, conservação e uso correto de ferramentas, EPIs e materiais.']
+  ];
+  var ROT_SIT_FICHA = { EMITIDA: 'Emitida', PENDENTE_PREENCHIMENTO: 'Pendente de preenchimento', AGUARDANDO_DEVOLUCAO: 'Aguardando devolução', RECEBIDA: 'Recebida', CONCLUIDA: 'Concluída', CANCELADA: 'Cancelada' };
+  var ROT_PARECER = { EFETIVAR: 'Efetivar', PRORROGAR: 'Prorrogar experiência', DESLIGAR: 'Desligar' };
+  function notaDe(f, k) { return f['nota_' + k]; }
+
+  async function pgFichas(c) {
+    var base = await carregarBase(true), gerir = pode('fichas.gerir');
+    var mapaO = {}; base.obras.forEach(function (o) { mapaO[o.id] = o; });
+    var bEmitir = el('button', { type: 'button', class: 'btn', text: 'Emitir ficha' });
+    var form = el('div'), tabela = el('div', { class: 'tw' });
+    var busca = el('input', { type: 'search', placeholder: 'Funcionário' });
+    var fObra = selecao([['', 'Todas as obras']].concat(base.obras.map(function (o) { return [o.id, nomeObra(o)]; })), '');
+    var fSit = selecao([['', 'Todas as situações']].concat(Object.keys(ROT_SIT_FICHA).map(function (k) { return [k, ROT_SIT_FICHA[k]]; })), '');
+    var fCont = selecao([['', 'Com ou sem contrato'], ['com', 'Vinculadas a contrato'], ['sem', 'Sem contrato']], '');
+    var fDe = el('input', { type: 'date' }), fAte = el('input', { type: 'date' });
+    limpar(c);
+    c.appendChild(el('div', { class: 'cab' }, [el('h1', { class: 'tit', text: 'Fichas de Avaliação' }), bEmitir]));
+    c.appendChild(el('p', { class: 'nota', text: gerir ? 'Você vê todas as fichas e pode alterar situação e resultados (RH/gestão).' : 'Você vê as fichas que emitiu. Alterar resultados e concluir fichas é feito pelo RH/gestão.' }));
+    c.appendChild(form);
+    c.appendChild(el('div', { class: 'filtros' }, [el('label', { style: 'flex:1;min-width:180px' }, ['Pesquisar', busca]), el('label', {}, ['Obra', fObra]), el('label', {}, ['Situação', fSit]), el('label', {}, ['Contrato', fCont]), el('label', {}, ['Emitida de', fDe]), el('label', {}, ['até', fAte])]));
+    c.appendChild(el('section', { class: 'card' }, [tabela]));
+    var lista = [];
+    async function carregar() { lista = await consulta(sb.from('fichas_avaliacao').select('*').order('emitida_em', { ascending: false }).limit(500)); pintar(); }
+    function pintar() {
+      var t = chave(busca.value), tb = el('tbody'), n = 0;
+      lista.forEach(function (f) {
+        if (t && chave(f.funcionario_nome).indexOf(t) < 0) return;
+        if (fObra.value && f.obra_id !== fObra.value) return;
+        if (fSit.value && f.situacao !== fSit.value) return;
+        if (fCont.value === 'com' && !f.contrato_id) return; if (fCont.value === 'sem' && f.contrato_id) return;
+        var dia = String(f.emitida_em).slice(0, 10); if (fDe.value && dia < fDe.value) return; if (fAte.value && dia > fAte.value) return;
+        n++;
+        var acoes = el('div', { class: 'acoes' });
+        acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Imprimir', onclick: function () { imprimirFicha(f); } }));
+        if (f.situacao !== 'CONCLUIDA' && f.situacao !== 'CANCELADA') acoes.appendChild(botaoAnexar(f, carregar));
+        if (f.anexo_path) acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Ver ficha assinada', onclick: function () { abrirAnexo(f.anexo_path); } }));
+        if (gerir) acoes.appendChild(el('button', { type: 'button', class: 'btn sec min', text: 'Gerir', onclick: function () { gerirFicha(f); } }));
+        tb.appendChild(el('tr', {}, [el('td', { text: f.numero }), el('td', {}, [el('b', { text: f.funcionario_nome }), el('br'), el('small', { text: (f.funcao || '') + (f.contrato_id ? ' · contrato vinculado' : '') })]),
+          el('td', { text: f.obra_id ? nomeObra(mapaO[f.obra_id]) : '—' }), el('td', { text: dataHoraBR(f.emitida_em) + ' · ' + (f.emitida_por_nome || '') }),
+          el('td', {}, [el('span', { class: 'selo ' + (f.situacao === 'CONCLUIDA' ? 'ok' : f.situacao === 'CANCELADA' ? 'ne' : 'av'), text: ROT_SIT_FICHA[f.situacao] })]),
+          el('td', { text: (f.media != null ? Number(f.media).toFixed(2) : '—') + (f.parecer ? ' · ' + ROT_PARECER[f.parecer] : '') }), el('td', {}, [acoes])]));
+      });
+      limpar(tabela);
+      tabela.appendChild(el('p', { class: 'nota', text: n + ' ficha(s)', style: 'margin-bottom:8px' }));
+      if (n) tabela.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, ['Nº', 'Funcionário', 'Obra', 'Emissão', 'Situação', 'Média / parecer', ''].map(function (h) { return el('th', { text: h }); }))]), tb]));
+    }
+    [busca, fObra, fSit, fCont, fDe, fAte].forEach(function (x) { x.oninput = pintar; x.onchange = pintar; });
+
+    function abrirEmissao(funcId) {
+      limpar(form);
+      var ativos = base.funcionarios.filter(function (f) { return f.situacao === 'ativo'; });
+      var fs = selecao([['', 'Selecione o funcionário']].concat(ativos.map(function (f) { return [f.id, f.nome + (f.matricula ? ' (' + f.matricula + ')' : '')]; })), funcId || '');
+      var ob = selecao([['', 'Sem obra']].concat(base.obras.filter(function (o) { return o.situacao === 'ativa'; }).map(function (o) { return [o.id, nomeObra(o)]; })), '');
+      var info = el('p', { class: 'nota' }), notas = {}, grade = el('div', { class: 'tw' });
+      var parecer = selecao([['', 'Sem parecer (preencher à mão)'], ['EFETIVAR', 'Efetivar'], ['PRORROGAR', 'Prorrogar experiência'], ['DESLIGAR', 'Desligar']], '');
+      var obs = el('textarea', { rows: '3', placeholder: 'Observações (opcional)' }), aval = el('input', { value: S.usuario.nome, placeholder: 'Avaliador (líder / encarregado)' });
+      var media = el('b', { text: '—' });
+      function pintarInfo() { var f = ativos.filter(function (x) { return x.id === fs.value; })[0]; info.textContent = f ? 'Função: ' + (f.funcao_texto || '—') + ' · Admissão: ' + (f.admissao ? dataBR(f.admissao) : '—') + ' · Os vencimentos do contrato entram na ficha automaticamente.' : ''; }
+      fs.onchange = pintarInfo; pintarInfo();
+      var tb = el('tbody');
+      CRITERIOS.forEach(function (cr) {
+        var tr = el('tr', {}, [el('td', {}, [el('b', { text: cr[1] }), el('br'), el('small', { text: cr[2] })])]);
+        for (var v = 0; v <= 10; v++) (function (v) {
+          var b = el('button', { type: 'button', class: 'btn sec min', text: String(v), style: 'min-width:34px;padding:4px', 'aria-pressed': 'false' });
+          b.onclick = function () { var ja = notas[cr[0]] === v; tr.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-pressed', 'false'); x.classList.add('sec'); }); if (ja) delete notas[cr[0]]; else { notas[cr[0]] = v; b.setAttribute('aria-pressed', 'true'); b.classList.remove('sec'); } calc(); };
+          tr.appendChild(el('td', {}, [b]));
+        })(v);
+        tb.appendChild(tr);
+      });
+      function calc() { var k = Object.keys(notas); media.textContent = k.length === 7 ? (k.reduce(function (s, x) { return s + notas[x]; }, 0) / 7).toFixed(2) : (k.length ? k.length + '/7 critérios' : '—'); }
+      grade.appendChild(el('table', {}, [el('thead', {}, [el('tr', {}, [el('th', { text: 'Critério (toque na nota; toque de novo para apagar)' })].concat([0,1,2,3,4,5,6,7,8,9,10].map(function (n) { return el('th', { text: n }); })))]), tb]));
+      var bNotas = el('button', { type: 'button', class: 'btn', text: 'Emitir com as notas e imprimir' });
+      var bBranco = el('button', { type: 'button', class: 'btn sec', text: 'Emitir em branco e imprimir' });
+      form.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px;border:2px solid #394086' }, [el('h2', { text: 'Emitir ficha de avaliação — período de experiência' }),
+        el('div', { class: 'form' }, [el('label', {}, ['Funcionário *', fs]), el('label', {}, ['Obra', ob]), el('label', {}, ['Avaliador', aval])]), info,
+        el('details', {}, [el('summary', { text: 'Preencher as notas no aplicativo (opcional)', style: 'cursor:pointer;color:#394086;font-weight:700' }), grade,
+          el('p', {}, ['Média final (soma ÷ 7): ', media]), el('div', { class: 'form' }, [el('label', {}, ['Parecer', parecer]), el('label', {}, ['Observações', obs])])]),
+        el('div', { class: 'acoes' }, [bNotas, bBranco, el('button', { type: 'button', class: 'btn sec', text: 'Cancelar', onclick: function () { limpar(form); } })])]));
+      async function emitir(comNotas) {
+        if (!fs.value) { toast('Selecione o funcionário.', 'er'); return; }
+        if (comNotas && Object.keys(notas).length && Object.keys(notas).length < 7) { if (!confirm('Só ' + Object.keys(notas).length + ' dos 7 critérios têm nota. Emitir assim mesmo?')) return; }
+        bNotas.disabled = bBranco.disabled = true;
+        try {
+          var r = await rpc('ficha_emitir', { p: { client_uuid: novoId(), funcionario_id: fs.value, obra_id: ob.value, notas: comNotas ? notas : {}, parecer: comNotas ? parecer.value : '', observacoes: comNotas ? obs.value : '', avaliador_nome: aval.value } });
+          var f = (await consulta(sb.from('fichas_avaliacao').select('*').eq('id', r.id)))[0];
+          toast('Ficha nº ' + r.numero + ' emitida.', 'ok'); limpar(form); await carregar(); imprimirFicha(f);
+        } catch (e) { toast(erroTexto(e), 'er'); } finally { bNotas.disabled = bBranco.disabled = false; }
+      }
+      bNotas.onclick = function () { emitir(true); }; bBranco.onclick = function () { emitir(false); };
+      form.scrollIntoView({ behavior: 'smooth' });
+    }
+    bEmitir.onclick = function () { abrirEmissao(''); };
+
+    function gerirFicha(f) {
+      limpar(form);
+      var sit = selecao(Object.keys(ROT_SIT_FICHA).map(function (k) { return [k, ROT_SIT_FICHA[k]]; }), f.situacao);
+      var campos = {}, linhas = CRITERIOS.map(function (cr) { var i = el('input', { type: 'number', min: '0', max: '10', value: notaDe(f, cr[0]) == null ? '' : String(notaDe(f, cr[0])), style: 'max-width:80px' }); campos[cr[0]] = i; return el('label', {}, [cr[1], i]); });
+      var parecer = selecao([['', '—'], ['EFETIVAR', 'Efetivar'], ['PRORROGAR', 'Prorrogar experiência'], ['DESLIGAR', 'Desligar']], f.parecer || '');
+      var obs = el('textarea', { rows: '3' }); obs.value = f.observacoes || '';
+      var salvar = el('button', { type: 'button', class: 'btn', text: 'Salvar' });
+      form.appendChild(el('section', { class: 'card', style: 'display:grid;gap:10px' }, [el('h2', { text: 'Ficha nº ' + f.numero + ' — ' + f.funcionario_nome + ' (RH/gestão)' }),
+        el('p', { class: 'nota', text: 'Lance aqui as notas da ficha devolvida (se foi preenchida à mão), o parecer e a situação. Tudo fica no histórico (auditoria).' }),
+        el('div', { class: 'form' }, linhas.concat([el('label', {}, ['Parecer', parecer]), el('label', {}, ['Situação', sit])])), el('label', {}, ['Observações', obs]),
+        el('div', { class: 'acoes' }, [salvar, el('button', { type: 'button', class: 'btn sec', text: 'Fechar', onclick: function () { limpar(form); } })])]));
+      salvar.onclick = async function () {
+        var n = {}; for (var k in campos) { if (campos[k].value !== '') { var v = Number(campos[k].value); if (!(v >= 0 && v <= 10)) { toast('Notas de 0 a 10.', 'er'); return; } n[k] = v; } }
+        salvar.disabled = true;
+        try { await rpc('ficha_gerir', { p_ficha: f.id, p: { notas: n, parecer: parecer.value, observacoes: obs.value, situacao: sit.value } }); toast('Ficha atualizada.', 'ok'); limpar(form); await carregar(); }
+        catch (e) { toast(erroTexto(e), 'er'); } finally { salvar.disabled = false; }
+      };
+      form.scrollIntoView({ behavior: 'smooth' });
+    }
+    S.recarregarFichas = function () { carregar().catch(function () { /* mantém */ }); };
+    await carregar();
+    if (S.fichaFunc) { var id = S.fichaFunc; S.fichaFunc = null; abrirEmissao(id); }
+  }
+
+  function botaoAnexar(f, depois) {
+    var inp = el('input', { type: 'file', accept: 'image/*,application/pdf', hidden: true });
+    var b = el('button', { type: 'button', class: 'btn sec min', text: f.anexo_path ? 'Substituir anexo' : 'Anexar ficha assinada' });
+    b.onclick = function () { inp.click(); };
+    inp.onchange = async function () {
+      var arq = inp.files[0]; if (!arq) return;
+      b.disabled = true; b.textContent = 'Enviando…';
+      try {
+        var blob = /^image\//.test(arq.type) ? await reduzirImagem(arq, 1800, 0.82) : arq;
+        if (blob.size > 5 * 1024 * 1024) throw new Error('Arquivo maior que 5 MB.');
+        var ext = blob.type === 'application/pdf' ? 'pdf' : 'jpg';
+        var caminho = 'fichas/' + f.id + '/' + Date.now() + '.' + ext;
+        var up = await sb.storage.from('rh-documentos').upload(caminho, blob, { contentType: blob.type, upsert: false });
+        if (up.error) throw up.error;
+        await rpc('ficha_anexar', { p_ficha: f.id, p_path: caminho });
+        toast('Ficha assinada anexada. Situação: Recebida.', 'ok'); if (depois) await depois();
+      } catch (e) { toast(erroTexto(e), 'er'); } finally { b.disabled = false; b.textContent = 'Anexar ficha assinada'; }
+    };
+    return el('span', {}, [b, inp]);
+  }
+  function reduzirImagem(arq, max, q) {
+    return new Promise(function (ok) {
+      var img = new Image(), url = URL.createObjectURL(arq);
+      img.onload = function () {
+        var e = Math.min(1, max / Math.max(img.width, img.height)), cv = document.createElement('canvas');
+        cv.width = Math.round(img.width * e); cv.height = Math.round(img.height * e);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+        cv.toBlob(function (b) { ok(b || arq); }, 'image/jpeg', q);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); ok(arq); };
+      img.src = url;
+    });
+  }
+  async function abrirAnexo(caminho) {
+    var r = await sb.storage.from('rh-documentos').createSignedUrl(caminho, 300);
+    if (r.error) { toast(erroTexto(r.error), 'er'); return; }
+    window.open(r.data.signedUrl, '_blank', 'noopener');
+  }
+
+  // Impressão no MODELO OFICIAL da Ficha de Avaliação (A4), igual ao documento do RH.
+  function imprimirFicha(f) {
+    function esc(t) { return String(t == null ? '' : t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    var riscar = f.vencimento2 && hojeISO() > String(f.vencimento1 || '');
+    var linhasCrit = CRITERIOS.map(function (cr) {
+      var n = notaDe(f, cr[0]), cel = '';
+      for (var v = 0; v <= 10; v++) cel += '<td class="n">' + (n === v ? 'X' : '') + '</td>';
+      return '<tr><td class="crit"><b>' + esc(cr[1]) + '</b><br><i>' + esc(cr[2]) + '</i></td>' + cel + '</tr>';
+    }).join('');
+    var obsLinhas = String(f.observacoes || '').split(/\n/).concat(['', '', '', '', '']).slice(0, 5).map(function (l) { return '<div class="lin">' + esc(l) + '</div>'; }).join('');
+    function x(p) { return f.parecer === p ? 'X' : '&nbsp;&nbsp;'; }
+    var html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Ficha de Avaliação nº ' + esc(f.numero) + ' — ' + esc(f.funcionario_nome) + '</title><style>' +
+      '@page{size:A4;margin:12mm 15mm 10mm 15mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:9.5pt}' +
+      '.topo{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #C8102E;padding-bottom:8px;margin-bottom:12px}.topo img{height:40px}' +
+      '.tt{text-align:right}.tt b{display:block;color:#1F3A6E;font-size:14pt}.tt span{color:#C8102E;font-weight:700;font-size:11pt}' +
+      'table{width:100%;border-collapse:collapse;margin-bottom:12px}td,th{border:1px solid #7F8DA6;padding:3px 5px;vertical-align:top}' +
+      '.sec{background:#1F3A6E;color:#fff;font-weight:700;font-size:9.5pt;padding:4px 6px}.lb{font-size:7pt;font-weight:700;color:#1F3A6E;display:block}' +
+      '.cab th{background:#E8ECF3;color:#1F3A6E;font-size:8pt;text-align:center}.cab th:first-child{text-align:left}.cab th.r{color:#C8102E}' +
+      '.crit{width:46%}.crit b{font-size:9pt}.crit i{font-size:7pt;color:#555}.n{text-align:center;font-weight:700;width:4.9%}' +
+      '.leg td{text-align:center;font-size:8pt}.lin{border-bottom:1px solid #7F8DA6;height:22px;padding-top:4px}' +
+      '.ass td{height:70px;text-align:center;vertical-align:bottom;font-size:8pt;width:33.3%}.ass td.sec{font-size:9.5pt}.ass b{color:#1F3A6E;display:block;border-top:1px solid #8A93A6;margin:0 14px;padding-top:3px}' +
+      '.rod{text-align:center;color:#7F8DA6;font-size:7pt;font-style:italic;margin-top:6px}s{color:#555}' +
+      '@media screen{body{max-width:190mm;margin:10mm auto}.bar{display:flex;gap:8px;margin-bottom:10px}.bar button{padding:8px 14px;font-size:14px}}@media print{.bar{display:none}}</style></head><body>' +
+      '<div class="bar"><button onclick="window.print()">Imprimir / salvar em PDF</button><button onclick="window.close()">Fechar</button></div>' +
+      '<div class="topo"><img src="icons/ficha-logo.png" alt="Master\'s Engenharia"><div class="tt"><b>FICHA DE AVALIAÇÃO</b><span>PERÍODO DE EXPERIÊNCIA</span></div></div>' +
+      '<table><tr><td class="sec" colspan="3">1. DADOS DO FUNCIONÁRIO</td></tr>' +
+      '<tr><td colspan="2"><span class="lb">NOME</span>' + esc(f.funcionario_nome) + '</td><td><span class="lb">FUNÇÃO</span>' + esc(f.funcao || '') + '</td></tr>' +
+      '<tr><td><span class="lb">DATA DE ADMISSÃO</span>' + esc(dataBR(f.admissao)) + '</td><td><span class="lb">VENCIMENTO DA EXPERIÊNCIA</span>' + (riscar ? '<s>' + esc(dataBR(f.vencimento1)) + '</s>' : esc(dataBR(f.vencimento1))) +
+      '</td><td><span class="lb">PRORROGAÇÃO</span>' + esc(dataBR(f.vencimento2)) + '</td></tr></table>' +
+      '<table class="cab"><tr><td class="sec" colspan="12">2. CRITÉRIOS DE AVALIAÇÃO&nbsp; (marque com X a nota de 0 a 10)</td></tr><tr><th>CRITÉRIO</th>' +
+      [0,1,2,3,4,5,6,7,8,9,10].map(function (v) { return '<th' + (v <= 4 ? ' class="r"' : '') + '>' + v + '</th>'; }).join('') + '</tr>' + linhasCrit + '</table>' +
+      '<table class="leg"><tr><td><b style="color:#C8102E">0 a 4:</b> Insatisfatório</td><td><b style="color:#B7791F">5 a 6:</b> Regular</td><td><b style="color:#1F3A6E">7 a 8:</b> Bom</td><td><b style="color:#1E7B34">9 a 10:</b> Ótimo</td></tr></table>' +
+      '<table><tr><td class="sec" colspan="2">3. RESULTADO DA AVALIAÇÃO</td></tr><tr><td style="width:34%"><span class="lb">MÉDIA FINAL (soma das notas ÷ 7)</span>' +
+      (f.media != null ? '<b>' + Number(f.media).toFixed(2).replace('.', ',') + '</b>' : '_____________') + '</td><td><span class="lb">PARECER</span><b>(' + x('EFETIVAR') + ') Efetivar &nbsp;&nbsp;&nbsp;&nbsp; (' + x('PRORROGAR') +
+      ') Prorrogar experiência &nbsp;&nbsp;&nbsp;&nbsp; (' + x('DESLIGAR') + ') Desligar</b></td></tr></table>' +
+      '<table><tr><td class="sec">4. OBSERVAÇÕES</td></tr><tr><td style="border:0;padding:0">' + obsLinhas + '</td></tr></table>' +
+      '<table class="ass"><tr><td class="sec" colspan="3" style="height:auto;text-align:left;vertical-align:top">5. ASSINATURAS</td></tr><tr>' +
+      '<td><b>Avaliador (Líder / Encarregado)</b>' + (f.avaliador_nome ? esc(f.avaliador_nome) + '<br>' : '') + 'Data: ____/____/________</td>' +
+      '<td><b>Gestor / Direção</b>Data: ____/____/________</td><td><b>Funcionário (ciência)</b>Data: ____/____/________</td></tr></table>' +
+      '<div class="rod">Master\'s Engenharia, Instalações e Projetos Ltda.&nbsp; •&nbsp; Documento para arquivo na pasta funcional do colaborador (RH) · Ficha nº ' + esc(f.numero) + '</div>' +
+      '<script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script></body></html>';
+    var w = window.open('', '_blank');
+    if (!w) { toast('O navegador bloqueou a janela de impressão. Permita pop-ups para este site.', 'er'); return; }
+    w.document.open(); w.document.write(html.replace('src="icons/', 'src="' + location.href.replace(/[#?].*$/, '').replace(/[^/]*$/, '') + 'icons/')); w.document.close();
   }
 
   /* ================= PÁGINA: TRANSFERÊNCIAS ================= */
